@@ -1,0 +1,10 @@
+{
+  "name": "astra-opus-fusion",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "GPT-6.2 Astra solves, Opus 5.5 handles the human. A Claude Code prototype.",
+  "scripts": {
+    "test": "node test/smoke.mjs"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "astra": {
+      "command": "node",
+      "args": ["server/astra-mcp.mjs"],
+      "env": {
+        "ASTRA_MODEL": "gpt-6.2-astra",
+        "ASTRA_EFFORT": "high"
+      }
+    }
+  }
+}
