@@ -12,9 +12,15 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'astra-smoke-'));
 const fake = path.join(here, 'fake-codex.mjs');
 fs.chmodSync(fake, 0o755);
 
-function startServer(codexBin) {
+// a stand-in for the user's personal Codex home, holding only a login file
+const personal = path.join(tmp, 'personal-codex');
+fs.mkdirSync(personal);
+fs.writeFileSync(path.join(personal, 'auth.json'), '{}');
+const fusionHome = path.join(tmp, 'codex-home');
+
+function startServer(codexBin, extraEnv = {}) {
   const server = spawn('node', [path.join(here, '../server/astra-mcp.mjs')], {
-    env: { ...process.env, CODEX_BIN: codexBin, FUSION_RUNS_DIR: path.join(tmp, 'runs') },
+    env: { ...process.env, CODEX_BIN: codexBin, FUSION_RUNS_DIR: path.join(tmp, 'runs'), CODEX_HOME: personal, FUSION_CODEX_HOME: fusionHome, ...extraEnv },
     stdio: ['pipe', 'pipe', 'inherit'],
   });
   const waiting = new Map();
@@ -44,6 +50,15 @@ assert.deepEqual(list.result.tools.map((t) => t.name), ['astra_start', 'astra_wa
 
 // start → wait → final message, with cited sequence numbers
 const started = await call('astra_start', { brief: 'fix the failing test', cwd: tmp });
+// Astra gets its own Codex home: fusion-only config, login linked from the personal home
+assert.match(started.text, /codex home: .*codex-home \(fusion-only config/);
+assert.match(fs.readFileSync(path.join(fusionHome, 'config.toml'), 'utf8'), /apps = false/);
+assert.equal(fs.readlinkSync(path.join(fusionHome, 'auth.json')), path.join(personal, 'auth.json'));
+const homeRun = await call('astra_start', { brief: 'WHICH HOME', cwd: tmp });
+const homeWait = await call('astra_wait', { run_id: homeRun.text.match(/run_id: (\S+)/)[1], timeout_s: 10 });
+assert.ok(homeWait.text.includes(`home=${fusionHome}`));
+// an edited config is left alone
+fs.appendFileSync(path.join(fusionHome, 'config.toml'), '# mine\n');
 const runId = started.text.match(/run_id: (\S+)/)[1];
 const waited = await call('astra_wait', { run_id: runId, timeout_s: 10 });
 assert.match(waited.text, /status: completed \(exit 0\)/);
@@ -97,10 +112,32 @@ assert.match(badWait.text, /\] error: .*model_not_found/);
 assert.match(badWait.text, /TURN FAILED: .*model_not_found/);
 assert.match(badWait.text, /Astra produced no final message/);
 
+assert.match(fs.readFileSync(path.join(fusionHome, 'config.toml'), 'utf8'), /# mine/);
+
 // errors are reported, not thrown
 assert.equal((await call('astra_wait', { run_id: 'nope' })).isError, true);
 assert.equal((await call('astra_start', { brief: 'x', sandbox: 'danger-full-access' })).isError, true);
 server.stdin.end();
+
+// if the login link has become a regular file, astra_start warns
+const copiedHome = path.join(tmp, 'codex-home-copied');
+fs.mkdirSync(copiedHome);
+fs.writeFileSync(path.join(copiedHome, 'auth.json'), '{}');
+const copied = startServer(fake, { FUSION_CODEX_HOME: copiedHome });
+await copied.rpc('initialize', {});
+const cw = await copied.call('astra_start', { brief: 'WHICH HOME', cwd: tmp });
+assert.match(cw.text, /warning: .*auth\.json is a regular file/);
+await copied.call('astra_wait', { run_id: cw.text.match(/run_id: (\S+)/)[1], timeout_s: 10 });
+copied.server.stdin.end();
+
+// FUSION_CODEX_HOME=inherit leaves Codex on the personal home
+const inherit = startServer(fake, { FUSION_CODEX_HOME: 'inherit' });
+await inherit.rpc('initialize', {});
+const ih = await inherit.call('astra_start', { brief: 'WHICH HOME', cwd: tmp });
+assert.match(ih.text, /personal config/);
+const iw = await inherit.call('astra_wait', { run_id: ih.text.match(/run_id: (\S+)/)[1], timeout_s: 10 });
+assert.ok(iw.text.includes(`home=${personal}`));
+inherit.server.stdin.end();
 
 // a missing Codex CLI gives an actionable message
 const missing = startServer('/nonexistent/codex');

@@ -19,6 +19,12 @@ process.stdin.on('end', async () => {
     emit({ type: 'turn.failed', error: { message } });
     process.exit(1);
   }
+  if (prompt.includes('WHICH HOME')) {
+    emit({ type: 'thread.started', thread_id: 'thread-home' });
+    emit({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: `home=${process.env.CODEX_HOME}` } });
+    emit({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } });
+    return;
+  }
   if (prompt.includes('HANG')) { emit({ type: 'thread.started', thread_id: 'thread-hang' }); await sleep(60000); return; }
   // Shapes below were captured from codex-cli 0.169 with gpt-6.2-astra.
   // The real CLI emits thread.started on resume too, with the same thread id.

@@ -8,6 +8,7 @@
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 
@@ -15,6 +16,13 @@ const RUNS_DIR = path.resolve(process.env.FUSION_RUNS_DIR || '.fusion/runs');
 const CODEX_BIN = process.env.CODEX_BIN || 'codex';
 const DEFAULT_MODEL = process.env.ASTRA_MODEL || 'gpt-6.2-astra';
 const DEFAULT_EFFORT = process.env.ASTRA_EFFORT || 'high';
+// Astra runs with its own Codex home so it does not load the user's personal
+// MCP servers, plugins, account connectors or global AGENTS.md.
+// Set FUSION_CODEX_HOME=inherit to use the personal Codex home instead.
+const FUSION_HOME = process.env.FUSION_CODEX_HOME === 'inherit'
+  ? null
+  : path.resolve(process.env.FUSION_CODEX_HOME || '.fusion/codex-home');
+const PERSONAL_HOME = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
 const SANDBOXES = ['read-only', 'workspace-write'];
 const MAX_WAIT_S = 240;
 const MAX_DIGEST_CHARS = 12000;
@@ -59,6 +67,58 @@ function readEvents(id) {
   return out;
 }
 
+// ---------- Codex home ----------
+
+const FUSION_CONFIG = `# Codex config for Legible fusion runs. Created by server/astra-mcp.mjs; edit freely,
+# it is only written when missing. Model, reasoning effort and sandbox are passed
+# per run on the command line and override anything here.
+approval_policy = "never"
+sandbox_mode = "read-only"
+
+# No subagents: their work would not appear in the trace.
+[agents]
+enabled = false
+
+[features]
+# ChatGPT account connectors (Gmail, Drive, Linear, ...). They run outside the sandbox.
+apps = false
+plugins = false
+remote_plugin = false
+computer_use = false
+browser_use = false
+browser_use_external = false
+goals = false
+image_generation = false
+tool_suggest = false
+skill_mcp_dependency_install = false
+`;
+
+// Creates the fusion Codex home if needed and links the user's login into it.
+// Returns { home, note } where note describes a login problem, if any.
+function ensureCodexHome() {
+  if (!FUSION_HOME) return { home: null, note: null };
+  fs.mkdirSync(FUSION_HOME, { recursive: true });
+  const config = path.join(FUSION_HOME, 'config.toml');
+  if (!fs.existsSync(config)) fs.writeFileSync(config, FUSION_CONFIG);
+  const source = path.join(PERSONAL_HOME, 'auth.json');
+  const link = path.join(FUSION_HOME, 'auth.json');
+  let stat = null;
+  try { stat = fs.lstatSync(link); } catch { /* not there yet */ }
+  if (stat?.isSymbolicLink()) {
+    if (fs.existsSync(link)) return { home: FUSION_HOME, note: null };
+    fs.unlinkSync(link); // dangling; relink below
+    stat = null;
+  }
+  if (stat) {
+    return { home: FUSION_HOME, note: `${link} is a regular file, not a link to ${source}. Codex may have replaced the link when it refreshed the login, so the two copies can drift apart. Delete it to relink, and run \`codex login\` if either side stops working.` };
+  }
+  if (!fs.existsSync(source)) {
+    return { home: FUSION_HOME, note: `No Codex login found at ${source}. Run \`codex login\`, or if your login is kept in the system keychain, run \`CODEX_HOME=${FUSION_HOME} codex login\`.` };
+  }
+  fs.symlinkSync(source, link);
+  return { home: FUSION_HOME, note: null };
+}
+
 // ---------- spawning Codex ----------
 
 function startSegment(id, kind, args, prompt) {
@@ -67,7 +127,8 @@ function startSegment(id, kind, args, prompt) {
     eventsPath(id),
     JSON.stringify({ type: 'fusion.segment', kind, at: new Date().toISOString(), prompt }) + '\n',
   );
-  const child = spawn(CODEX_BIN, args, { cwd: meta.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+  const env = meta.codex_home ? { ...process.env, CODEX_HOME: meta.codex_home } : process.env;
+  const child = spawn(CODEX_BIN, args, { cwd: meta.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
   const out = fs.createWriteStream(eventsPath(id), { flags: 'a' });
   const err = fs.createWriteStream(path.join(runDir(id), 'stderr.log'), { flags: 'a' });
   child.stdout.pipe(out);
@@ -246,9 +307,10 @@ const tools = {
       dir = fs.realpathSync(dir); // Codex reports resolved paths (/private/tmp, not /tmp)
       const id = `${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '')}-${crypto.randomBytes(3).toString('hex')}`;
       fs.mkdirSync(runDir(id), { recursive: true });
-      writeMeta(id, { run_id: id, cwd: dir, sandbox, model, effort, created_at: Date.now() });
+      const { home, note } = ensureCodexHome();
+      writeMeta(id, { run_id: id, cwd: dir, sandbox, model, effort, codex_home: home, created_at: Date.now() });
       startSegment(id, 'start', codexArgs({ model, effort, sandbox, cwd: dir }), brief);
-      return `run_id: ${id}\nstatus: running\nmodel: ${model} (effort ${effort}), sandbox: ${sandbox}, cwd: ${dir}\nraw trace: ${eventsPath(id)}\nnext: call astra_wait with this run_id.`;
+      return `run_id: ${id}\nstatus: running\nmodel: ${model} (effort ${effort}), sandbox: ${sandbox}, cwd: ${dir}\ncodex home: ${home ? `${home} (fusion-only config; login linked from ${PERSONAL_HOME})` : `${PERSONAL_HOME} (personal config, including its MCP servers and plugins)`}${note ? `\nwarning: ${note}` : ''}\nraw trace: ${eventsPath(id)}\nnext: call astra_wait with this run_id.`;
     },
   },
 
@@ -319,6 +381,7 @@ const tools = {
       if (!thread) throw new Error('This run never started a Codex thread, so there is nothing to reply to. Start a new run with astra_start.');
       const sb = sandbox || meta.sandbox;
       if (sandbox) writeMeta(run_id, { sandbox });
+      if (meta.codex_home) ensureCodexHome(); // the thread lives in the home the run started with
       startSegment(run_id, 'reply', codexArgs({ resumeThread: thread, model: meta.model, effort: meta.effort, sandbox: sb }), message);
       return `run_id: ${run_id}\nstatus: running (follow-up sent, sandbox: ${sb})\nnext: call astra_wait.`;
     },
