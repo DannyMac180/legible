@@ -53,6 +53,7 @@ const started = await call('astra_start', { brief: 'fix the failing test', cwd: 
 // Astra gets its own Codex home: fusion-only config, login linked from the personal home
 assert.match(started.text, /codex home: .*codex-home \(fusion-only config/);
 assert.match(fs.readFileSync(path.join(fusionHome, 'config.toml'), 'utf8'), /apps = false/);
+assert.match(fs.readFileSync(path.join(fusionHome, 'config.toml'), 'utf8'), /\[skills\]\ninclude_instructions = false/);
 assert.equal(fs.readlinkSync(path.join(fusionHome, 'auth.json')), path.join(personal, 'auth.json'));
 const homeRun = await call('astra_start', { brief: 'WHICH HOME', cwd: tmp });
 const homeWait = await call('astra_wait', { run_id: homeRun.text.match(/run_id: (\S+)/)[1], timeout_s: 10 });

@@ -79,6 +79,11 @@ sandbox_mode = "read-only"
 [agents]
 enabled = false
 
+# No skills catalog. Codex reads personal skills from ~/.agents/skills whatever
+# CODEX_HOME is; this keeps them, and all other skills, out of Astra's prompt.
+[skills]
+include_instructions = false
+
 [features]
 # ChatGPT account connectors (Gmail, Drive, Linear, ...). They run outside the sandbox.
 apps = false

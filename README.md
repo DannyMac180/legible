@@ -70,6 +70,7 @@ The server writes `config.toml` there once and then leaves it alone, so you can 
 
 - ChatGPT account connectors (Gmail, Drive, Linear and so on). These come from the account, not from local config, so an empty home alone does not remove them; `features.apps = false` does.
 - Subagents, because their work would not appear in the trace.
+- The skills catalog (`skills.include_instructions = false`). Codex reads personal skills from `~/.agents/skills` whatever `CODEX_HOME` is, so a separate home does not remove them; this setting keeps every skill list out of Astra's prompt. It is all or nothing, so skills that ship inside a repository are presumably hidden too (not tested). The skill files are still on disk, and Astra can read them with a shell command if a brief sends it there.
 - Image generation, goals, and browser and computer use.
 
 Web search, shell commands and file editing stay on.
@@ -104,13 +105,13 @@ Checked on 2026-11-18 with codex-cli 0.169.0-alpha.11.1 (the ChatGPT.app bundle)
 - The digest matches the live shapes for `agent_message`, `command_execution`, `file_change`, `web_search`, `error` items, `turn.completed` and `turn.failed`. The fake Codex in `test/` now emits those captured shapes.
 - A full 240-second `astra_wait` returns normally through Claude Code's own MCP client (checked with `gpt-6-astra` on codex-cli 0.155.1, which is what `codex` resolved to in that session).
 - With the fusion Codex home on codex-cli 0.170.0: a workspace-write run and a read-only follow-up completed with the linked login, the session record contains no account connectors, subagent or image tools and no personal `AGENTS.md`, no `logs/` folder appeared in the working directory, and the sandbox held as before. A one-word task cost about 17,000 input tokens, down from about 29,500.
+- With the skills catalog off as well: asked on a first turn and on a follow-up which skills it had been given, Astra answered "no skills listed" both times, and the session record contains no skill list and no mention of `~/.agents/skills`. Each model call now starts at about 12,000 input tokens.
 
 Not seen from the real CLI, so their digest lines are still guesses: `reasoning`, `todo_list`, `mcp_tool_call`. Astra wrote its plan as an ordinary message and no reasoning items were emitted at effort high.
 
 ## Known gaps
 
 - **The event stream is not complete.** A command the sandbox blocks never appears in `codex exec --json`; it shows up only in Astra's own account and in the session file under the Codex home's `sessions/` folder. Ordinary failing commands (non-zero exit) do appear. So "Astra tried X and was blocked" cannot be confirmed from the trace. `astra_wait` says so in its closing note.
-- **Astra still sees your personal skills.** The fusion Codex home (below) removes personal MCP servers, plugins and account connectors, but Codex also reads skills from `~/.agents/skills` whatever `CODEX_HOME` is. They are instructions, not tools, and anything they run stays inside the sandbox, but they cost context and can pull Astra off the brief.
 - The fusion Codex home sits inside this repository. A workspace-write run whose working directory is this repository could edit that home's `config.toml` or login link.
 - workspace-write also allows writes to `/tmp` and `$TMPDIR`, not only the working directory.
 
