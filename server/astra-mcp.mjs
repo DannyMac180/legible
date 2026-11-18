@@ -113,7 +113,23 @@ const clip = (s, n) => {
   return s.length <= n ? s : `${s.slice(0, Math.floor(n * 0.6))} …[${s.length - n} chars cut]… ${s.slice(-Math.floor(n * 0.4))}`;
 };
 
-function digestEvent({ seq, raw, ev }, full) {
+// Codex wraps every command as `/bin/zsh -lc '<cmd>'`. Show the inner command
+// when the quoting is simple enough to strip safely.
+function unwrapShell(cmd) {
+  const m = /^\/bin\/(?:zsh|bash|sh) -lc (.+)$/s.exec(String(cmd ?? ''));
+  if (!m) return String(cmd ?? '');
+  const q = m[1];
+  if (/^'[^']*'$/.test(q)) return q.slice(1, -1);
+  if (/^"(?:[^"\\$`]|\\["\\$`])*"$/.test(q)) return q.slice(1, -1).replace(/\\(["\\$`])/g, '$1');
+  return q;
+}
+
+const relPath = (p, cwd) => (cwd && typeof p === 'string' && p.startsWith(cwd + path.sep) ? p.slice(cwd.length + 1) : p);
+
+// Codex reports thread-cumulative token counts on every turn.completed.
+const usageText = (u) => `thread total so far: ${u.input_tokens ?? '?'} input tokens (${u.cached_input_tokens ?? 0} cached), ${u.output_tokens ?? '?'} output`;
+
+function digestEvent({ seq, raw, ev }, full, cwd) {
   const n = full ? 4000 : 500;
   const tag = `[${seq}]`;
   if (!ev) return `${tag} raw: ${clip(raw, n)}`;
@@ -127,7 +143,7 @@ function digestEvent({ seq, raw, ev }, full) {
     case 'item.updated':
       return null;
     case 'turn.completed':
-      return `${tag} turn completed${ev.usage ? ` (usage: ${JSON.stringify(ev.usage)})` : ''}`;
+      return `${tag} turn completed${ev.usage ? ` (${usageText(ev.usage)})` : ''}`;
     case 'turn.failed':
       return `${tag} TURN FAILED: ${clip(ev.error?.message ?? JSON.stringify(ev.error), n)}`;
     case 'error':
@@ -138,14 +154,20 @@ function digestEvent({ seq, raw, ev }, full) {
         case 'agent_message': return `${tag} Astra said: ${clip(it.text, full ? 8000 : 1200)}`;
         case 'reasoning': return `${tag} reasoning: ${clip(it.text, n)}`;
         case 'command_execution':
-          return `${tag} ran \`${clip(it.command, 300)}\` → exit ${it.exit_code ?? '?'}${it.aggregated_output ? `\n      ${clip(it.aggregated_output, n).replace(/\n/g, '\n      ')}` : ''}`;
+          return `${tag} ran \`${clip(unwrapShell(it.command), 300)}\` → exit ${it.exit_code ?? '?'}${it.aggregated_output ? `\n      ${clip(it.aggregated_output, n).replace(/\n/g, '\n      ')}` : ''}`;
         case 'file_change':
-          return `${tag} file changes${it.status ? ` (${it.status})` : ''}: ${(it.changes || []).map((c) => `${c.kind} ${c.path}`).join(', ')}`;
+          return `${tag} file changes${it.status ? ` (${it.status})` : ''}: ${(it.changes || []).map((c) => `${c.kind} ${relPath(c.path, cwd)}`).join(', ')}`;
         case 'mcp_tool_call': return `${tag} tool call ${it.server}.${it.tool} (${it.status ?? 'done'})`;
-        case 'web_search': return `${tag} web search: ${clip(it.query, 300)}`;
+        case 'web_search': {
+          const urls = (it.results || []).map((r) => r.url).filter(Boolean);
+          const shown = urls.slice(0, full ? 20 : 5);
+          return `${tag} web search: ${clip(it.query || it.action?.query, 300)}${urls.length ? ` → ${urls.length} results${shown.map((u) => `\n      ${u}`).join('')}${urls.length > shown.length ? `\n      … ${urls.length - shown.length} more in the raw trace` : ''}` : ''}`;
+        }
         case 'todo_list':
           return `${tag} plan: ${(it.items || []).map((t) => `${t.completed ? '[x]' : '[ ]'} ${t.text}`).join('; ')}`;
-        case 'error': return `${tag} error: ${clip(it.message, n)}`;
+        // Codex sends its non-fatal startup warnings (config, feature flags) as
+        // error items. Real failures arrive as top-level error / turn.failed.
+        case 'error': return `${tag} Codex notice: ${clip(it.message, full ? n : 160)}`;
         default: return `${tag} ${it.type ?? 'item'}: ${clip(JSON.stringify(it), n)}`;
       }
     }
@@ -154,17 +176,18 @@ function digestEvent({ seq, raw, ev }, full) {
   }
 }
 
-function digest(events, full) {
+function digest(events, full, cwd) {
   const lines = [];
   let size = 0;
   let lastError = null;
   for (const e of events) {
-    const line = digestEvent(e, full);
+    const line = digestEvent(e, full, cwd);
     if (!line) continue;
     // Codex repeats "Reconnecting..." errors; keep one of each run of duplicates.
     const body = line.replace(/^\[\d+\] /, '');
-    if (body.startsWith('error:') && body === lastError) continue;
-    lastError = body.startsWith('error:') ? body : null;
+    const repeatable = /^(error|Codex notice):/.test(body);
+    if (repeatable && body === lastError) continue;
+    lastError = repeatable ? body : null;
     if (size + line.length > MAX_DIGEST_CHARS) {
       lines.push(`… digest cut here. Call astra_trace with from_seq=${e.seq} for the rest.`);
       break;
@@ -218,8 +241,9 @@ const tools = {
     async run({ brief, cwd, sandbox = 'read-only', model = DEFAULT_MODEL, effort = DEFAULT_EFFORT }) {
       if (!brief?.trim()) throw new Error('brief is empty.');
       if (!SANDBOXES.includes(sandbox)) throw new Error(`sandbox must be one of: ${SANDBOXES.join(', ')}.`);
-      const dir = path.resolve(cwd || process.cwd());
+      let dir = path.resolve(cwd || process.cwd());
       if (!fs.existsSync(dir)) throw new Error(`cwd does not exist: ${dir}`);
+      dir = fs.realpathSync(dir); // Codex reports resolved paths (/private/tmp, not /tmp)
       const id = `${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '')}-${crypto.randomBytes(3).toString('hex')}`;
       fs.mkdirSync(runDir(id), { recursive: true });
       writeMeta(id, { run_id: id, cwd: dir, sandbox, model, effort, created_at: Date.now() });
@@ -260,13 +284,14 @@ const tools = {
         `status: ${status}${meta.exit_code != null ? ` (exit ${meta.exit_code})` : ''}${status === 'running' ? `, ${elapsed}s so far` : ''}`,
       ];
       if (meta.error) parts.push(`error: ${meta.error}`);
-      parts.push(`raw trace: ${eventsPath(run_id)}`, '', '--- new trace events ---', digest(fresh, false) || '(none)');
+      parts.push(`raw trace: ${eventsPath(run_id)}`, '', '--- new trace events ---', digest(fresh, false, meta.cwd) || '(none)');
       if (status === 'running') {
         parts.push('', 'next: Astra is still working. Call astra_wait again. Tell the user something only if a decision, deviation or risk showed up above.');
       } else {
         const fm = finalMessage(events);
         parts.push('', `--- Astra's final message${fm ? ` [${fm.seq}]` : ''} ---`, fm ? fm.ev.item.text : '(Astra produced no final message; see stderr.log in the run folder)');
-        parts.push('', 'next: verify the claims that matter against the trace or the files themselves, then report. Use astra_reply to send Astra back for anything missing or wrong.');
+        parts.push('', 'next: verify the claims that matter against the trace or the files themselves, then report. Use astra_reply to send Astra back for anything missing or wrong.',
+          'note: commands the sandbox blocked do not appear in this trace (Codex leaves them out of its event stream). If Astra reports a blocked or failed command you cannot find above, say you could not confirm it.');
       }
       return parts.join('\n');
     },
@@ -314,9 +339,9 @@ const tools = {
       required: ['run_id'],
     },
     async run({ run_id, from_seq = 1, to_seq = Infinity, full = false }) {
-      const { status } = statusOf(run_id);
+      const { meta, status } = statusOf(run_id);
       const events = readEvents(run_id).filter((e) => e.seq >= from_seq && e.seq <= to_seq);
-      return `run_id: ${run_id}\nstatus: ${status}\nraw trace: ${eventsPath(run_id)}\n\n${digest(events, full) || '(no events in that range)'}`;
+      return `run_id: ${run_id}\nstatus: ${status}\nraw trace: ${eventsPath(run_id)}\n\n${digest(events, full, meta.cwd) || '(no events in that range)'}`;
     },
   },
 

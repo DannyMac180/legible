@@ -48,8 +48,18 @@ const runId = started.text.match(/run_id: (\S+)/)[1];
 const waited = await call('astra_wait', { run_id: runId, timeout_s: 10 });
 assert.match(waited.text, /status: completed \(exit 0\)/);
 assert.match(waited.text, /\[1\] ── brief sent to Astra: fix the failing test/);
-assert.match(waited.text, /ran `npm test` → exit 1/);
-assert.match(waited.text, /file changes \(completed\): update src\/a\.js/);
+// the shell wrapper is stripped, paths are relative to cwd
+assert.match(waited.text, /ran `npm test` → exit 1\n      3 passing/);
+assert.match(waited.text, /file changes \(completed\): update src\/a\.js, add notes\.md/);
+// startup warnings read as notices, not errors, and repeats collapse
+assert.equal(waited.text.match(/Codex notice: Under-development features/g).length, 1);
+assert.doesNotMatch(waited.text, /\] error:/);
+// web search shows the query and result URLs
+assert.match(waited.text, /web search: node lts → 1 results\n      https:\/\/nodejs\.org\/en\/download\//);
+// commentary before the final message is kept, but is not the final message
+assert.match(waited.text, /Astra said: I will run the tests first\./);
+assert.match(waited.text, /thread total so far: 10 input tokens \(4 cached\), 5 output/);
+assert.match(waited.text, /commands the sandbox blocked do not appear/);
 assert.match(waited.text, /Astra's final message \[\d+\] ---\nDone with: fix the failing test/);
 
 // a second wait returns only new events (none)
@@ -78,6 +88,14 @@ const refused = await call('astra_reply', { run_id: hangId, message: 'hello' });
 assert.equal(refused.isError, true);
 const cancelled = await call('astra_cancel', { run_id: hangId });
 assert.match(cancelled.text, /status: cancelled/);
+
+// a turn the API rejects: failed status, the reason in the digest, no final message
+const bad = await call('astra_start', { brief: 'FAIL', cwd: tmp });
+const badWait = await call('astra_wait', { run_id: bad.text.match(/run_id: (\S+)/)[1], timeout_s: 10 });
+assert.match(badWait.text, /status: failed \(exit 1\)/);
+assert.match(badWait.text, /\] error: .*model_not_found/);
+assert.match(badWait.text, /TURN FAILED: .*model_not_found/);
+assert.match(badWait.text, /Astra produced no final message/);
 
 // errors are reported, not thrown
 assert.equal((await call('astra_wait', { run_id: 'nope' })).isError, true);
