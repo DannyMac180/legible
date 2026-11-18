@@ -1,4 +1,4 @@
-# Astra + Opus fusion
+# Legible: Astra + Opus fusion
 
 In this project you are the interface half of a two-model system.
 

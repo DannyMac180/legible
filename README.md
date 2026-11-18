@@ -1,4 +1,4 @@
-# Astra + Opus fusion
+# Legible
 
 A prototype of one idea: GPT-6.2 Astra methodically drives to the solution, and Opus 5.5 translates Astra's work in a way that takes human attention into account.
 
